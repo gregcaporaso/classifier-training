@@ -5,60 +5,48 @@
 
 set -e
 
-GTDB_VERSION=226
-GTDB_BASE_URL="https://data.gtdb.ecogenomic.org/releases/release${GTDB_VERSION}/${GTDB_VERSION}.0"
+log_status() {
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] [train-gtdb] $*"
+}
 
-GTDB_FILES=(
-  "genomic_files_reps/ar53_ssu_reps_r${GTDB_VERSION}.fna.gz"
-  "genomic_files_reps/bac120_ssu_reps_r${GTDB_VERSION}.fna.gz"
-  "bac120_taxonomy_r${GTDB_VERSION}.tsv.gz"
-  "ar53_taxonomy_r${GTDB_VERSION}.tsv.gz"
-)
+GTDB_VERSION="226.0"
+GTDB_DOMAIN="Both"
+GTDB_DB_TYPE="SpeciesReps"
+GTDB_URL_TYPE="Primary"
+GTDB_LABEL="gtdb_r${GTDB_VERSION}_${GTDB_DOMAIN}_${GTDB_DB_TYPE}"
+GTDB_SEQS_ARTIFACT="${GTDB_LABEL}_seqs.qza"
+GTDB_TAXONOMY_ARTIFACT="${GTDB_LABEL}_taxonomy.qza"
+GTDB_CLASSIFIER_ARTIFACT="${GTDB_LABEL}_classifier.qza"
 
-for rel_path in "${GTDB_FILES[@]}"; do
-  gz_file="$(basename "${rel_path}")"
-  input_file="${gz_file%.gz}"
+log_status "Pipeline starting for ${GTDB_LABEL}"
+log_status "Checking whether classifier artifact already exists"
 
-  if [[ ! -f "${input_file}" ]]; then
-    if [[ ! -f "${gz_file}" ]]; then
-      wget "${GTDB_BASE_URL}/${rel_path}" -O "${gz_file}"
-    fi
-    gunzip -c "${gz_file}" > "${input_file}"
-  fi
-done
+if [[ -f "${GTDB_CLASSIFIER_ARTIFACT}" ]]; then
+  log_status "Classifier already exists: ${GTDB_CLASSIFIER_ARTIFACT}"
+  log_status "Bailing out without downloading GTDB data or retraining"
+  exit 0
+fi
 
+log_status "Classifier not found; checking for existing GTDB reference artifacts"
 
-qiime tools import \
-  --type 'FeatureData[Sequence]' \
-  --input-path ar53_ssu_reps_r${GTDB_VERSION}.fna \
-  --output-path ar53_ssu_reps.qza
+if [[ -f "${GTDB_SEQS_ARTIFACT}" && -f "${GTDB_TAXONOMY_ARTIFACT}" ]]; then
+  log_status "Using existing GTDB artifacts: ${GTDB_SEQS_ARTIFACT} and ${GTDB_TAXONOMY_ARTIFACT}"
+else
+  log_status "Downloading GTDB reference data with RESCRIPt"
+  qiime rescript get-gtdb-data \
+    --p-version "${GTDB_VERSION}" \
+    --p-domain "${GTDB_DOMAIN}" \
+    --p-db-type "${GTDB_DB_TYPE}" \
+    --p-url-type "${GTDB_URL_TYPE}" \
+    --o-gtdb-sequences "${GTDB_SEQS_ARTIFACT}" \
+    --o-gtdb-taxonomy "${GTDB_TAXONOMY_ARTIFACT}"
+  log_status "GTDB reference artifacts created"
+fi
 
-qiime tools import \
-  --type 'FeatureData[Taxonomy]' \
-  --input-format HeaderlessTSVTaxonomyFormat \
-  --input-path ar53_taxonomy_r${GTDB_VERSION}.tsv \
-  --output-path ar53_taxonomy.qza
-
-qiime tools import \
-  --type 'FeatureData[Sequence]' \
-  --input-path  bac120_ssu_reps_r${GTDB_VERSION}.fna \
-  --output-path bac120_ssu_reps.qza
-
-qiime tools import \
-  --type 'FeatureData[Taxonomy]' \
-  --input-format HeaderlessTSVTaxonomyFormat \
-  --input-path bac120_taxonomy_r${GTDB_VERSION}.tsv \
-  --output-path bac120_taxonomy.qza
-
-qiime feature-table merge-seqs \
-  --i-data ar53_ssu_reps.qza bac120_ssu_reps.qza \
-  --o-merged-data gtdb_seqs.qza
-
-qiime feature-table merge-taxa \
-   --i-data ar53_taxonomy.qza bac120_taxonomy.qza \
-   --o-merged-data gtdb_taxonomy.qza
-
+log_status "Training naive Bayes classifier"
 qiime feature-classifier fit-classifier-naive-bayes \
-  --i-reference-reads gtdb_seqs.qza \
-  --i-reference-taxonomy gtdb_taxonomy.qza \
-  --o-classifier gtdb_classifier_r${GTDB_VERSION}.qza
+  --i-reference-reads "${GTDB_SEQS_ARTIFACT}" \
+  --i-reference-taxonomy "${GTDB_TAXONOMY_ARTIFACT}" \
+  --o-classifier "${GTDB_CLASSIFIER_ARTIFACT}"
+
+log_status "Classifier training complete: ${GTDB_CLASSIFIER_ARTIFACT}"
