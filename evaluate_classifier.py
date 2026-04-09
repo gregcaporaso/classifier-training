@@ -7,7 +7,6 @@ import json
 from datetime import datetime
 from pathlib import Path
 
-import altair as alt
 import click
 import numpy as np
 import pandas as pd
@@ -15,6 +14,11 @@ import qiime2
 from qiime2.plugins.feature_classifier.actions import classify_sklearn
 from qiime2.plugins.taxa.actions import collapse
 from scipy.stats import spearmanr
+
+
+DEFAULT_MAX_PLOT_POINTS = 10_000
+MAX_TAXA_PREVIEW = 50
+MAX_FEATURE_DIFF_PREVIEW = 100
 
 
 def parse_levels(levels_text: str) -> list[int]:
@@ -62,88 +66,195 @@ def format_taxonomy_for_tooltip(taxon: str) -> str:
     return ";\n".join(parts)
 
 
-def render_interactive_scatterplot_html(
-    old_values: np.ndarray,
-    new_values: np.ndarray,
-    taxa_labels: list[str],
-    sample_labels: list[str],
-    level: int,
-    rho: float,
-    p_value: float,
-) -> str:
-    x_plot = np.log1p(old_values)
-    y_plot = np.log1p(new_values)
-    plot_df = pd.DataFrame(
+def write_taxa_list_file(path: Path, taxa: list[str]) -> None:
+    path.write_text("\n".join(taxa) + "\n", encoding="utf-8")
+
+
+def make_taxa_preview_html(items: list[str], summary: str, full_filename: str) -> str:
+    preview = items[:MAX_TAXA_PREVIEW]
+    lines = "\n".join(f"<li>{html.escape(item)}</li>" for item in preview)
+    extra = ""
+    if len(items) > MAX_TAXA_PREVIEW:
+        extra = (
+            f"<p>Showing first {MAX_TAXA_PREVIEW} of {len(items)} entries. "
+            f"Full list: <a href=\"{html.escape(full_filename)}\">{html.escape(full_filename)}</a></p>"
+        )
+    else:
+        extra = (
+            f"<p>Full list: <a href=\"{html.escape(full_filename)}\">{html.escape(full_filename)}</a></p>"
+        )
+
+    return (
+        f"<details><summary>{html.escape(summary)}</summary>"
+        f"{extra}<ul>{lines}</ul></details>"
+    )
+
+
+def build_scatter_plot_df(
+    old_shared: pd.DataFrame,
+    new_shared: pd.DataFrame,
+    shared_taxa: list[str],
+    all_samples: list[str],
+    max_points: int,
+) -> pd.DataFrame:
+    old_flat = old_shared.to_numpy(dtype=float).ravel()
+    new_flat = new_shared.to_numpy(dtype=float).ravel()
+    taxa_labels = np.array([taxon for taxon in shared_taxa for _sample in all_samples], dtype=object)
+    sample_labels = np.array(all_samples * len(shared_taxa), dtype=object)
+
+    n_points = len(old_flat)
+    if n_points == 0:
+        return pd.DataFrame(columns=["x", "y", "taxon_wrapped", "sample", "old_count", "new_count"])
+
+    if n_points > max_points:
+        rng = np.random.default_rng(0)
+        keep_idx = np.sort(rng.choice(n_points, size=max_points, replace=False))
+    else:
+        keep_idx = np.arange(n_points)
+
+    old_keep = old_flat[keep_idx]
+    new_keep = new_flat[keep_idx]
+    taxa_keep = taxa_labels[keep_idx]
+    sample_keep = sample_labels[keep_idx]
+
+    return pd.DataFrame(
         {
-            "x": x_plot,
-            "y": y_plot,
-            "taxon": taxa_labels,
-            "taxon_wrapped": [format_taxonomy_for_tooltip(t) for t in taxa_labels],
-            "sample": sample_labels,
-            "old_count": old_values,
-            "new_count": new_values,
+            "x": np.log1p(old_keep),
+            "y": np.log1p(new_keep),
+            "taxon_wrapped": [format_taxonomy_for_tooltip(t) for t in taxa_keep],
+            "sample": sample_keep,
+            "old_count": old_keep,
+            "new_count": new_keep,
         }
     )
 
-    max_value = float(max(np.max(x_plot, initial=0.0), np.max(y_plot, initial=0.0)))
-    diag_df = pd.DataFrame({"x": [0.0, max_value], "y": [0.0, max_value]})
 
-    points = (
-        alt.Chart(plot_df)
-        .mark_circle(size=35, opacity=0.4)
-        .encode(
-            x=alt.X("x:Q", title="Old taxonomy counts per sample-taxon pair (log1p)"),
-            y=alt.Y("y:Q", title="New taxonomy counts per sample-taxon pair (log1p)"),
-            tooltip=[
-                alt.Tooltip("taxon_wrapped:N", title="Taxon"),
-                alt.Tooltip("sample:N", title="Sample"),
-                alt.Tooltip("old_count:Q", title="Old count", format=",.0f"),
-                alt.Tooltip("new_count:Q", title="New count", format=",.0f"),
+def write_level_page(
+    output_dir: Path,
+    level: int,
+    old_taxa_count: int,
+    new_taxa_count: int,
+    shared_taxa_count: int,
+    old_total_freq: float,
+    new_total_freq: float,
+    rho: float,
+    p_value: float,
+    scatter_plot_records: list[dict[str, object]] | None,
+    sampled_points_count: int,
+    total_points_count: int,
+    scatter_max_value: float,
+    shared_taxa: list[str],
+    old_only_taxa: list[str],
+    new_only_taxa: list[str],
+) -> str:
+    page_filename = f"level-{level}.html"
+
+    shared_file = f"level-{level}-shared-taxa.txt"
+    old_only_file = f"level-{level}-old-only-taxa.txt"
+    new_only_file = f"level-{level}-new-only-taxa.txt"
+
+    write_taxa_list_file(output_dir / shared_file, shared_taxa)
+    write_taxa_list_file(output_dir / old_only_file, old_only_taxa)
+    write_taxa_list_file(output_dir / new_only_file, new_only_taxa)
+
+    if scatter_plot_records is None:
+        chart_html = "<p>No shared taxa available for plotting.</p>"
+        chart_note = ""
+    else:
+        chart_spec = {
+            "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
+            "width": 760,
+            "height": 500,
+            "layer": [
+                {
+                    "data": {"values": [{"x": 0.0, "y": 0.0}, {"x": scatter_max_value, "y": scatter_max_value}]},
+                    "mark": {"type": "line", "strokeDash": [6, 4], "color": "#555"},
+                    "encoding": {
+                        "x": {"field": "x", "type": "quantitative"},
+                        "y": {"field": "y", "type": "quantitative"},
+                    },
+                },
+                {
+                    "data": {"values": scatter_plot_records},
+                    "mark": {"type": "circle", "opacity": 0.4, "size": 35},
+                    "encoding": {
+                        "x": {
+                            "field": "x",
+                            "type": "quantitative",
+                            "title": "Old taxonomy counts per sample-taxon pair (log1p)",
+                        },
+                        "y": {
+                            "field": "y",
+                            "type": "quantitative",
+                            "title": "New taxonomy counts per sample-taxon pair (log1p)",
+                        },
+                        "tooltip": [
+                            {"field": "taxon_wrapped", "type": "nominal", "title": "Taxon"},
+                            {"field": "sample", "type": "nominal", "title": "Sample"},
+                            {"field": "old_count", "type": "quantitative", "title": "Old count", "format": ",.0f"},
+                            {"field": "new_count", "type": "quantitative", "title": "New count", "format": ",.0f"},
+                        ],
+                    },
+                },
             ],
-        )
-    )
+            "title": f"Level {level} shared taxa frequencies (Spearman rho={rho:.4f}, p-value={p_value:.3e})",
+        }
 
-    diagonal = (
-        alt.Chart(diag_df)
-        .mark_line(strokeDash=[6, 4], color="#555")
-        .encode(x="x:Q", y="y:Q")
-    )
-
-    chart = (
-        (diagonal + points)
-        .properties(
-            width=760,
-            height=500,
-            title=(
-                f"Level {level} shared taxa frequencies "
-                f"(Spearman rho={rho:.4f}, p-value={p_value:.3e})"
-            ),
-        )
-        .interactive()
-    )
-
-    # Large tables are common here; disable the default row cap for Vega-Lite export.
-    alt.data_transformers.disable_max_rows()
-    chart_spec = json.dumps(chart.to_dict())
-    chart_id = f"level-{level}-scatterplot"
-    return f"""
-<div id="{chart_id}" class="altair-scatterplot"></div>
+        chart_html = f"""
+<div id="level-{level}-scatterplot" class="altair-scatterplot"></div>
 <script>
-    (function() {{
-        const spec = {chart_spec};
-        vegaEmbed('#{chart_id}', spec, {{actions: false}}).catch(console.error);
-    }})();
+  (function() {{
+    const spec = {json.dumps(chart_spec)};
+    vegaEmbed('#level-{level}-scatterplot', spec, {{actions: false}}).catch(console.error);
+  }})();
 </script>
 """
+        if sampled_points_count < total_points_count:
+            chart_note = (
+                f"<p>Plot shows a deterministic sample of {sampled_points_count:,} "
+                f"of {total_points_count:,} points to keep page size manageable.</p>"
+            )
+        else:
+            chart_note = f"<p>Plot includes all {total_points_count:,} points.</p>"
 
+    page_html = f"""
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Classifier Evaluation - Level {level}</title>
+  <script src="https://cdn.jsdelivr.net/npm/vega@5"></script>
+  <script src="https://cdn.jsdelivr.net/npm/vega-lite@5"></script>
+  <script src="https://cdn.jsdelivr.net/npm/vega-embed@6"></script>
+  <style>
+    body {{ font-family: -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif; margin: 2rem auto; max-width: 1200px; line-height: 1.5; padding: 0 1rem; }}
+    section {{ border: 1px solid #ddd; border-radius: 8px; padding: 1rem 1.25rem; margin: 1rem 0; }}
+    h1, h2 {{ margin-top: 0; }}
+    .altair-scatterplot {{ border: 1px solid #eee; border-radius: 6px; overflow: hidden; }}
+    details {{ margin-top: 0.75rem; }}
+    ul {{ max-height: 20rem; overflow-y: auto; background: #fafafa; padding: 0.75rem 1.75rem; border-radius: 6px; border: 1px solid #eee; }}
+  </style>
+</head>
+<body>
+  <h1>Taxonomic Level {level}</h1>
+  <p><a href="index.html">Back to index</a></p>
+  <section>
+    <p><strong>Old table taxa:</strong> {old_taxa_count} | <strong>New table taxa:</strong> {new_taxa_count} | <strong>Shared taxa:</strong> {shared_taxa_count}</p>
+    <p><strong>Old total frequency:</strong> {old_total_freq:.0f} | <strong>New total frequency:</strong> {new_total_freq:.0f}</p>
+    <p><strong>Spearman (shared taxa, sample-wise frequencies):</strong> rho={rho:.4f}, p-value={p_value:.3e}</p>
+    {chart_note}
+    {chart_html}
+    {make_taxa_preview_html(shared_taxa, f'Shared taxa ({len(shared_taxa)})', shared_file)}
+    {make_taxa_preview_html(old_only_taxa, f'Only in old taxonomy ({len(old_only_taxa)})', old_only_file)}
+    {make_taxa_preview_html(new_only_taxa, f'Only in new taxonomy ({len(new_only_taxa)})', new_only_file)}
+  </section>
+</body>
+</html>
+"""
 
-def make_taxa_list_html(items: list[str], summary: str) -> str:
-    lines = "\n".join(f"<li>{html.escape(item)}</li>" for item in items)
-    return (
-        f"<details><summary>{html.escape(summary)}</summary>"
-        f"<ul>{lines}</ul>"
-        f"</details>"
-    )
+    (output_dir / page_filename).write_text(page_html, encoding="utf-8")
+    return page_filename
 
 
 def format_artifact_header_line(label: str, artifact_fp: Path, artifact: qiime2.Artifact) -> str:
@@ -158,21 +269,25 @@ def load_taxonomy_dict(taxonomy_artifact: qiime2.Artifact) -> dict[str, str]:
     tax_df = taxonomy_artifact.view(pd.DataFrame)
     tax_dict = {}
     for feature_id in tax_df.index:
-        tax_str = str(tax_df.loc[feature_id, "Taxon"]) if "Taxon" in tax_df.columns else str(tax_df.iloc[feature_id, 0])
+        if "Taxon" in tax_df.columns:
+            tax_str = str(tax_df.loc[feature_id, "Taxon"])
+        else:
+            tax_str = str(tax_df.loc[feature_id].iloc[0])
         tax_dict[str(feature_id)] = tax_str
     return tax_dict
 
 
-def render_differing_features_table_html(differing_features: list[dict[str, str]]) -> str:
-    """Render an HTML table of features with differing taxonomies."""
+def render_differing_features_preview_html(differing_features: list[dict[str, str]]) -> str:
+    """Render a preview HTML table of features with differing taxonomies."""
     if not differing_features:
         return "<p>No features with differing taxonomies found.</p>"
 
+    preview_features = differing_features[:MAX_FEATURE_DIFF_PREVIEW]
     rows = []
-    for feature in differing_features:
+    for feature in preview_features:
         feature_id_escaped = html.escape(feature["feature_id"])
-        old_tax_formatted = feature["old_taxonomy"].replace(";", ";<br>")
-        new_tax_formatted = feature["new_taxonomy"].replace(";", ";<br>")
+        old_tax_formatted = html.escape(feature["old_taxonomy"]).replace(";", ";<br>")
+        new_tax_formatted = html.escape(feature["new_taxonomy"]).replace(";", ";<br>")
         rows.append(
             f"""
   <tr style="border-bottom: 1px solid #eee;">
@@ -181,6 +296,13 @@ def render_differing_features_table_html(differing_features: list[dict[str, str]
     <td style="padding: 0.5rem; width: 37.5%; border-left: 1px solid #ddd;">{new_tax_formatted}</td>
   </tr>
 """
+        )
+
+    footer = ""
+    if len(differing_features) > MAX_FEATURE_DIFF_PREVIEW:
+        footer = (
+            f"<p>Showing first {MAX_FEATURE_DIFF_PREVIEW} rows. "
+            "Use the full TSV for all differing features.</p>"
         )
 
     table_html = f"""
@@ -198,6 +320,7 @@ def render_differing_features_table_html(differing_features: list[dict[str, str]
   </tbody>
 </table>
 </div>
+{footer}
 """
     return table_html
 
@@ -251,6 +374,13 @@ def render_differing_features_table_html(differing_features: list[dict[str, str]
     type=float,
     help="Confidence value passed to classify-sklearn.",
 )
+@click.option(
+    "--max-plot-points",
+    default=DEFAULT_MAX_PLOT_POINTS,
+    show_default=True,
+    type=click.IntRange(min=1),
+    help="Maximum number of points to include per level scatter plot.",
+)
 def main(
     classifier_fp: Path,
     old_taxonomy_fp: Path,
@@ -259,6 +389,7 @@ def main(
     output_dir: Path,
     levels: str,
     confidence: float,
+    max_plot_points: int,
 ) -> None:
     """Evaluate a newly trained classifier against an older taxonomy assignment."""
     comparison_levels = parse_levels(levels)
@@ -295,7 +426,7 @@ def main(
                 "new_taxonomy": new_tax,
             })
 
-    report_sections: list[str] = []
+    level_index_rows: list[str] = []
 
     for level in comparison_levels:
         click.echo(f"Collapsing and comparing level {level}...")
@@ -323,71 +454,85 @@ def main(
 
         old_flat = old_shared.to_numpy(dtype=float).ravel()
         new_flat = new_shared.to_numpy(dtype=float).ravel()
-        taxa_labels = [taxon for taxon in shared_taxa for _sample in all_samples]
-        sample_labels = all_samples * len(shared_taxa)
         if len(old_flat) > 1:
             rho, p_value = spearmanr(old_flat, new_flat)
         else:
             rho, p_value = float("nan"), float("nan")
 
-        if len(old_flat) > 0:
-            plot_html = render_interactive_scatterplot_html(
-                old_values=old_flat,
-                new_values=new_flat,
-                taxa_labels=taxa_labels,
-                sample_labels=sample_labels,
-                level=level,
-                rho=rho,
-                p_value=p_value,
+        if len(old_flat) > 0 and len(shared_taxa) > 0:
+            plot_df = build_scatter_plot_df(
+                old_shared=old_shared,
+                new_shared=new_shared,
+                shared_taxa=shared_taxa,
+                all_samples=all_samples,
+                max_points=max_plot_points,
             )
+            scatter_plot_records = plot_df.to_dict(orient="records")
+            sampled_points_count = len(plot_df)
+            total_points_count = len(old_flat)
+            if len(plot_df) > 0:
+                scatter_max_value = float(max(plot_df["x"].max(), plot_df["y"].max()))
+            else:
+                scatter_max_value = 0.0
         else:
-            plot_html = "<p>No shared taxa available for plotting.</p>"
+            scatter_plot_records = None
+            sampled_points_count = 0
+            total_points_count = len(old_flat)
+            scatter_max_value = 0.0
 
-        level_section = f"""
-<section>
-  <h2>Taxonomic level {level}</h2>
-  <p><strong>Old table taxa:</strong> {len(old_taxa)} | <strong>New table taxa:</strong> {len(new_taxa)} | <strong>Shared taxa:</strong> {len(shared_taxa)}</p>
-  <p><strong>Old total frequency:</strong> {old_df.to_numpy(dtype=float).sum():.0f} | <strong>New total frequency:</strong> {new_df.to_numpy(dtype=float).sum():.0f}</p>
-  <p><strong>Spearman (shared taxa, sample-wise frequencies):</strong> rho={rho:.4f}, p-value={p_value:.3e}</p>
-  {plot_html}
-  {make_taxa_list_html(shared_taxa, f'Shared taxa ({len(shared_taxa)})')}
-  {make_taxa_list_html(old_only_taxa, f'Only in old taxonomy ({len(old_only_taxa)})')}
-  {make_taxa_list_html(new_only_taxa, f'Only in new taxonomy ({len(new_only_taxa)})')}
-</section>
-"""
-        report_sections.append(level_section)
+        level_page_filename = write_level_page(
+            output_dir=output_dir,
+            level=level,
+            old_taxa_count=len(old_taxa),
+            new_taxa_count=len(new_taxa),
+            shared_taxa_count=len(shared_taxa),
+            old_total_freq=float(old_df.to_numpy(dtype=float).sum()),
+            new_total_freq=float(new_df.to_numpy(dtype=float).sum()),
+            rho=rho,
+            p_value=p_value,
+            scatter_plot_records=scatter_plot_records,
+            sampled_points_count=sampled_points_count,
+            total_points_count=total_points_count,
+            scatter_max_value=scatter_max_value,
+            shared_taxa=shared_taxa,
+            old_only_taxa=old_only_taxa,
+            new_only_taxa=new_only_taxa,
+        )
 
-    feature_comparison_html = render_differing_features_table_html(differing_features)
-    feature_comparison_section = f"""
-<section>
-  <h2>Feature-level Taxonomy Comparison</h2>
-  <p><strong>Total features:</strong> {len(all_features)} | <strong>Features with differing taxonomy:</strong> {len(differing_features)}</p>
-  {feature_comparison_html}
-</section>
-"""
-    report_sections.append(feature_comparison_section)
+        level_index_rows.append(
+            f"<tr><td><a href=\"{level_page_filename}\">Level {level}</a></td>"
+            f"<td>{len(old_taxa)}</td><td>{len(new_taxa)}</td><td>{len(shared_taxa)}</td>"
+            f"<td>{rho:.4f}</td><td>{p_value:.3e}</td></tr>"
+        )
 
-    report_html = f"""
+    feature_diff_df = pd.DataFrame(differing_features)
+    feature_diff_tsv = output_dir / "feature-taxonomy-differences.tsv"
+    if len(feature_diff_df) == 0:
+        feature_diff_df = pd.DataFrame(columns=["feature_id", "old_taxonomy", "new_taxonomy"])
+    feature_diff_df.to_csv(feature_diff_tsv, sep="\t", index=False)
+
+    feature_comparison_preview = render_differing_features_preview_html(differing_features)
+
+    index_html = f"""
 <!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Classifier Evaluation Report</title>
-    <script src="https://cdn.jsdelivr.net/npm/vega@5"></script>
-    <script src="https://cdn.jsdelivr.net/npm/vega-lite@5"></script>
-    <script src="https://cdn.jsdelivr.net/npm/vega-embed@6"></script>
+    <title>Classifier Evaluation Report Index</title>
   <style>
     body {{ font-family: -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif; margin: 2rem auto; max-width: 1200px; line-height: 1.5; padding: 0 1rem; }}
     section {{ border: 1px solid #ddd; border-radius: 8px; padding: 1rem 1.25rem; margin: 1rem 0; }}
     h1, h2 {{ margin-top: 0; }}
-        .altair-scatterplot {{ border: 1px solid #eee; border-radius: 6px; overflow: hidden; }}
+        table {{ width: 100%; border-collapse: collapse; }}
+        th, td {{ border-bottom: 1px solid #eee; padding: 0.5rem; text-align: left; }}
+        thead tr {{ background: #f5f5f5; }}
     details {{ margin-top: 0.75rem; }}
     ul {{ max-height: 20rem; overflow-y: auto; background: #fafafa; padding: 0.75rem 1.75rem; border-radius: 6px; border: 1px solid #eee; }}
   </style>
 </head>
 <body>
-  <h1>Classifier Evaluation Report</h1>
+    <h1>Classifier Evaluation Report</h1>
   <p><strong>Generated:</strong> {html.escape(datetime.now().isoformat(timespec='seconds'))}</p>
     {format_artifact_header_line('Classifier', classifier_fp, classifier)}
     {format_artifact_header_line('Old taxonomy', old_taxonomy_fp, old_taxonomy)}
@@ -395,14 +540,39 @@ def main(
     {format_artifact_header_line('Table', table_fp, table)}
   <p><strong>Levels:</strong> {', '.join(map(str, comparison_levels))}</p>
     {format_artifact_header_line('New taxonomy output', new_taxonomy_fp, new_taxonomy)}
-  {''.join(report_sections)}
+
+    <section>
+        <h2>Level Comparisons</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th>Level Page</th>
+                    <th>Old taxa</th>
+                    <th>New taxa</th>
+                    <th>Shared taxa</th>
+                    <th>Spearman rho</th>
+                    <th>p-value</th>
+                </tr>
+            </thead>
+            <tbody>
+                {''.join(level_index_rows)}
+            </tbody>
+        </table>
+    </section>
+
+    <section>
+        <h2>Feature-level Taxonomy Comparison</h2>
+        <p><strong>Total features:</strong> {len(all_features)} | <strong>Features with differing taxonomy:</strong> {len(differing_features)}</p>
+        <p><strong>Full table:</strong> <a href="feature-taxonomy-differences.tsv">feature-taxonomy-differences.tsv</a></p>
+        {feature_comparison_preview}
+    </section>
 </body>
 </html>
 """
 
-    report_fp = output_dir / "classifier-evaluation-report.html"
-    report_fp.write_text(report_html, encoding="utf-8")
-    click.echo(f"Report written: {report_fp}")
+    index_fp = output_dir / "index.html"
+    index_fp.write_text(index_html, encoding="utf-8")
+    click.echo(f"Report bundle index written: {index_fp}")
 
 
 if __name__ == "__main__":
