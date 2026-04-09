@@ -146,6 +146,13 @@ def make_taxa_list_html(items: list[str], summary: str) -> str:
     )
 
 
+def format_artifact_header_line(label: str, artifact_fp: Path, artifact: qiime2.Artifact) -> str:
+    return (
+        f"<p><strong>{html.escape(label)}:</strong> {html.escape(str(artifact_fp))} "
+        f"(UUID: {html.escape(str(artifact.uuid))})</p>"
+    )
+
+
 @click.command(context_settings={"help_option_names": ["-h", "--help"]})
 @click.option(
     "--classifier",
@@ -307,12 +314,12 @@ def main(
 <body>
   <h1>Classifier Evaluation Report</h1>
   <p><strong>Generated:</strong> {html.escape(datetime.now().isoformat(timespec='seconds'))}</p>
-  <p><strong>Classifier:</strong> {html.escape(str(classifier_fp))}</p>
-  <p><strong>Old taxonomy:</strong> {html.escape(str(old_taxonomy_fp))}</p>
-  <p><strong>Sequences:</strong> {html.escape(str(sequences_fp))}</p>
-  <p><strong>Table:</strong> {html.escape(str(table_fp))}</p>
+    {format_artifact_header_line('Classifier', classifier_fp, classifier)}
+    {format_artifact_header_line('Old taxonomy', old_taxonomy_fp, old_taxonomy)}
+    {format_artifact_header_line('Sequences', sequences_fp, sequences)}
+    {format_artifact_header_line('Table', table_fp, table)}
   <p><strong>Levels:</strong> {', '.join(map(str, comparison_levels))}</p>
-  <p><strong>New taxonomy output:</strong> {html.escape(str(new_taxonomy_fp))}</p>
+    {format_artifact_header_line('New taxonomy output', new_taxonomy_fp, new_taxonomy)}
   {''.join(report_sections)}
 </body>
 </html>
