@@ -153,6 +153,55 @@ def format_artifact_header_line(label: str, artifact_fp: Path, artifact: qiime2.
     )
 
 
+def load_taxonomy_dict(taxonomy_artifact: qiime2.Artifact) -> dict[str, str]:
+    """Load FeatureData[Taxonomy] artifact and return dict mapping feature_id to taxonomy."""
+    tax_df = taxonomy_artifact.view(pd.DataFrame)
+    tax_dict = {}
+    for feature_id in tax_df.index:
+        tax_str = str(tax_df.loc[feature_id, "Taxon"]) if "Taxon" in tax_df.columns else str(tax_df.iloc[feature_id, 0])
+        tax_dict[str(feature_id)] = tax_str
+    return tax_dict
+
+
+def render_differing_features_table_html(differing_features: list[dict[str, str]]) -> str:
+    """Render an HTML table of features with differing taxonomies."""
+    if not differing_features:
+        return "<p>No features with differing taxonomies found.</p>"
+
+    rows = []
+    for feature in differing_features:
+        feature_id_escaped = html.escape(feature["feature_id"])
+        old_tax_formatted = feature["old_taxonomy"].replace(";", ";<br>")
+        new_tax_formatted = feature["new_taxonomy"].replace(";", ";<br>")
+        rows.append(
+            f"""
+  <tr style="border-bottom: 1px solid #eee;">
+    <td style="font-family: monospace; font-size: 0.9em; word-break: break-all; padding: 0.5rem; width: 25%;">{feature_id_escaped}</td>
+    <td style="padding: 0.5rem; width: 37.5%; border-left: 1px solid #ddd;">{old_tax_formatted}</td>
+    <td style="padding: 0.5rem; width: 37.5%; border-left: 1px solid #ddd;">{new_tax_formatted}</td>
+  </tr>
+"""
+        )
+
+    table_html = f"""
+<div style="overflow-x: auto; max-height: 40rem; overflow-y: auto;">
+<table style="width: 100%; border-collapse: collapse; font-size: 0.9em; table-layout: fixed;">
+  <thead style="position: sticky; top: 0; background: #fff;">
+    <tr style="background: #f5f5f5; border-bottom: 2px solid #ddd;">
+      <th style="text-align: left; padding: 0.5rem; font-weight: bold; width: 25%;">Feature ID</th>
+      <th style="text-align: left; padding: 0.5rem; font-weight: bold; width: 37.5%; border-left: 1px solid #ddd;">Old Taxonomy</th>
+      <th style="text-align: left; padding: 0.5rem; font-weight: bold; width: 37.5%; border-left: 1px solid #ddd;">New Taxonomy</th>
+    </tr>
+  </thead>
+  <tbody>
+    {''.join(rows)}
+  </tbody>
+</table>
+</div>
+"""
+    return table_html
+
+
 @click.command(context_settings={"help_option_names": ["-h", "--help"]})
 @click.option(
     "--classifier",
@@ -230,6 +279,22 @@ def main(
     new_taxonomy_fp = output_dir / "new-taxonomy.qza"
     new_taxonomy.save(str(new_taxonomy_fp))
 
+    click.echo("Comparing feature-level taxonomies...")
+    old_tax_dict = load_taxonomy_dict(old_taxonomy)
+    new_tax_dict = load_taxonomy_dict(new_taxonomy)
+
+    all_features = set(old_tax_dict.keys()) | set(new_tax_dict.keys())
+    differing_features = []
+    for feature_id in sorted(all_features):
+        old_tax = old_tax_dict.get(feature_id, "")
+        new_tax = new_tax_dict.get(feature_id, "")
+        if old_tax != new_tax:
+            differing_features.append({
+                "feature_id": feature_id,
+                "old_taxonomy": old_tax,
+                "new_taxonomy": new_tax,
+            })
+
     report_sections: list[str] = []
 
     for level in comparison_levels:
@@ -291,6 +356,16 @@ def main(
 </section>
 """
         report_sections.append(level_section)
+
+    feature_comparison_html = render_differing_features_table_html(differing_features)
+    feature_comparison_section = f"""
+<section>
+  <h2>Feature-level Taxonomy Comparison</h2>
+  <p><strong>Total features:</strong> {len(all_features)} | <strong>Features with differing taxonomy:</strong> {len(differing_features)}</p>
+  {feature_comparison_html}
+</section>
+"""
+    report_sections.append(feature_comparison_section)
 
     report_html = f"""
 <!doctype html>
