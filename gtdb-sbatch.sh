@@ -2,6 +2,7 @@
 #SBATCH --job-name=train-gtdb
 #SBATCH --time=48:00:00
 #SBATCH --mem=100G
+#SBATCH --partition rhel10
 
 set -e
 
@@ -9,7 +10,7 @@ log_status() {
   echo "[$(date '+%Y-%m-%d %H:%M:%S')] [train-gtdb] $*"
 }
 
-GTDB_VERSION="226.0"
+GTDB_VERSION="232.0"
 GTDB_DOMAIN="Both"
 GTDB_DB_TYPE="SpeciesReps"
 GTDB_URL_TYPE="Primary"
