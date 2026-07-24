@@ -2,6 +2,7 @@
 #SBATCH --job-name=evaluate-classifier
 #SBATCH --time=48:00:00
 #SBATCH --mem=100G
+#SBATCH --partition rhel10
 
 set -euo pipefail
 
