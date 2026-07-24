@@ -13,22 +13,25 @@ usage() {
   cat <<'EOF'
 Usage:
   sbatch evaluate-classifier-sbatch.sh \
-    --classifier NEW_CLASSIFIER.qza \
+    (--classifier NEW_CLASSIFIER.qza --sequences REP_SEQS.qza | --new-taxonomy NEW_TAXONOMY.qza) \
     --old-taxonomy OLD_TAXONOMY.qza \
-    --sequences REP_SEQS.qza \
     --table TABLE.qza \
     --output-dir OUTPUT_DIR \
     [--levels 2,3,4,5,6,7] \
     [--confidence 0.7]
 
-Required arguments:
-  --classifier    Path to FeatureData[Classifier] artifact (.qza)
+Required arguments (mutually exclusive):
+  --classifier    Path to FeatureData[Classifier] artifact (.qza); requires --sequences
+  --new-taxonomy  Path to a pre-computed FeatureData[Taxonomy] artifact (.qza);
+                  skips classify-sklearn
+
+Other required arguments:
   --old-taxonomy  Path to old FeatureData[Taxonomy] artifact (.qza)
-  --sequences     Path to FeatureData[Sequence] artifact (.qza)
   --table         Path to FeatureTable[Frequency] artifact (.qza)
   --output-dir    Directory for evaluation outputs/report
 
 Optional arguments:
+  --sequences     Path to FeatureData[Sequence] artifact (.qza); required with --classifier
   --levels        Comma-separated taxonomic levels (default: 2,3,4,5,6,7)
   --confidence    classify-sklearn confidence value (default: 0.7)
   -h, --help      Show this help message
@@ -36,6 +39,7 @@ EOF
 }
 
 CLASSIFIER=""
+NEW_TAXONOMY=""
 OLD_TAXONOMY=""
 SEQUENCES=""
 TABLE=""
@@ -47,6 +51,10 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --classifier)
       CLASSIFIER="$2"
+      shift 2
+      ;;
+    --new-taxonomy)
+      NEW_TAXONOMY="$2"
       shift 2
       ;;
     --old-taxonomy)
@@ -85,8 +93,26 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ -z "$CLASSIFIER" || -z "$OLD_TAXONOMY" || -z "$SEQUENCES" || -z "$TABLE" || -z "$OUTPUT_DIR" ]]; then
+if [[ -z "$OLD_TAXONOMY" || -z "$TABLE" || -z "$OUTPUT_DIR" ]]; then
   log_status "Missing required argument(s)."
+  usage
+  exit 1
+fi
+
+if [[ -z "$CLASSIFIER" && -z "$NEW_TAXONOMY" ]]; then
+  log_status "Provide either --classifier or --new-taxonomy."
+  usage
+  exit 1
+fi
+
+if [[ -n "$CLASSIFIER" && -n "$NEW_TAXONOMY" ]]; then
+  log_status "--classifier and --new-taxonomy are mutually exclusive."
+  usage
+  exit 1
+fi
+
+if [[ -n "$CLASSIFIER" && -z "$SEQUENCES" ]]; then
+  log_status "--sequences is required when --classifier is used."
   usage
   exit 1
 fi
@@ -100,18 +126,26 @@ if [[ ! -f "$EVAL_SCRIPT" ]]; then
 fi
 
 log_status "Starting classifier evaluation"
-log_status "Classifier: ${CLASSIFIER}"
+log_status "Classifier: ${CLASSIFIER:-<not provided>}"
+log_status "New taxonomy: ${NEW_TAXONOMY:-<not provided>}"
 log_status "Old taxonomy: ${OLD_TAXONOMY}"
-log_status "Sequences: ${SEQUENCES}"
+log_status "Sequences: ${SEQUENCES:-<not provided>}"
 log_status "Table: ${TABLE}"
 log_status "Output dir: ${OUTPUT_DIR}"
 log_status "Levels: ${LEVELS}"
 log_status "Confidence: ${CONFIDENCE}"
 
+TAXONOMY_ARG=""
+if [[ -n "$CLASSIFIER" ]]; then
+  TAXONOMY_ARG="--classifier ${CLASSIFIER} --sequences ${SEQUENCES}"
+else
+  TAXONOMY_ARG="--new-taxonomy ${NEW_TAXONOMY}"
+fi
+
+# shellcheck disable=SC2086
 python "$EVAL_SCRIPT" \
-  --classifier "$CLASSIFIER" \
+  $TAXONOMY_ARG \
   --old-taxonomy "$OLD_TAXONOMY" \
-  --sequences "$SEQUENCES" \
   --table "$TABLE" \
   --output-dir "$OUTPUT_DIR" \
   --levels "$LEVELS" \
