@@ -118,7 +118,16 @@ if [[ -n "$CLASSIFIER" && -z "$SEQUENCES" ]]; then
   exit 1
 fi
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Locate evaluate_classifier.py next to this script. Under Slurm the batch
+# script is executed from a spool copy, so BASH_SOURCE no longer points at the
+# repo; recover the submitted script's path from scontrol in that case.
+if [[ -n "${SLURM_JOB_ID:-}" ]] && command -v scontrol >/dev/null 2>&1; then
+  SBATCH_SCRIPT="$(scontrol show job "$SLURM_JOB_ID" 2>/dev/null | sed -n 's/^ *Command=//p' | head -1)"
+  SBATCH_SCRIPT="${SBATCH_SCRIPT%% *}"
+  SCRIPT_DIR="$(cd "$(dirname "$SBATCH_SCRIPT")" && pwd)"
+else
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+fi
 EVAL_SCRIPT="${SCRIPT_DIR}/evaluate_classifier.py"
 
 if [[ ! -f "$EVAL_SCRIPT" ]]; then
