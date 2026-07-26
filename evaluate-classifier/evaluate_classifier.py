@@ -200,11 +200,27 @@ def main(
     new_tax_df = new_taxonomy.view(pd.DataFrame)
     comparison_df = compare_taxonomy(old_tax_df, new_tax_df)
     click.echo(f"  {len(comparison_df)} features with differing taxonomy assignments.")
-    comparison_metadata = qiime2.Metadata(comparison_df)
-    (taxonomy_comparison_viz,) = tabulate(input=comparison_metadata)
-    taxonomy_comparison_viz.save(str(output_dir / "taxonomy-comparison.qzv"))
 
-    qzv_paths: list[Path] = [output_dir / "taxonomy-comparison.qzv"]
+    qzv_paths: list[Path] = []
+    if comparison_df.empty:
+        # qiime2.Metadata rejects a zero-ID table, so skip the tabulate step.
+        n_common = old_tax_df.index.intersection(new_tax_df.index).size
+        if n_common == 0:
+            click.echo(
+                "  WARNING: old and new taxonomies share no feature IDs; "
+                "there was nothing to compare."
+            )
+        else:
+            click.echo(
+                f"  All {n_common} shared features have identical taxonomy; "
+                "the two assignments are identical at the feature level. "
+                "Skipping the taxonomy-comparison visualization."
+            )
+    else:
+        comparison_metadata = qiime2.Metadata(comparison_df)
+        (taxonomy_comparison_viz,) = tabulate(input=comparison_metadata)
+        taxonomy_comparison_viz.save(str(output_dir / "taxonomy-comparison.qzv"))
+        qzv_paths.append(output_dir / "taxonomy-comparison.qzv")
 
     for level in comparison_levels:
         click.echo(f"Collapsing and comparing level {level}...")
