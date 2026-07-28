@@ -51,7 +51,8 @@ Keeping the expensive step separate means the comparison is cheap to re-run — 
 
 ## Running it
 
-Requires an activated QIIME 2 2026.7 environment (e.g. `rachis-qiime2-2026.7`), which must also provide RESCRIPt.
+Requires an activated QIIME 2 environment (e.g. `rachis-qiime2-2026.7`).
+This was tested with 2026.7, so that is presumed to be the lowest version that will work.
 
 First produce the new taxonomy, if you do not already have it:
 
@@ -147,9 +148,5 @@ Relevant references:
 
 ### Other ideas
 
-- **Weight the comparison by abundance.**
-  An earlier version ran `quality-control evaluate-taxonomy` with the feature table to weight precision/recall by relative abundance, separating a disagreement on an abundant feature from one on a singleton.
-  It was dropped as redundant with step 2, and because it errors unless the taxonomies are first filtered to exactly the features in the table (reference taxonomies routinely cover far more).
-  If the weighted view turns out to be wanted, that filtering is a `feature-table tabulate-feature-frequencies` piped into `rescript filter-taxa --m-ids-to-keep-file`.
 - **Report confidence shifts.**
   Nothing here looks at the `Confidence` column, so two taxonomies that assign identical strings with very different confidence appear perfectly concordant.

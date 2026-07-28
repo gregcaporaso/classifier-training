@@ -63,4 +63,5 @@ dmypy.json
 
 # Project-specific
 slurm*out
-*qza
+*.qza
+*.qzv
